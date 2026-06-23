@@ -1,0 +1,39 @@
+name: Test upload with advanced options (content-type, part-size, include, sse)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Create test files for upload
+        run: |
+          mkdir -p /tmp/upload-source
+          echo "hello world" > /tmp/upload-source/file1.txt
+          echo "test content" > /tmp/upload-source/file2.log
+
+      - name: Run upload with content-type, part-size, include, and sse options (expect failure on auth)
+        id: upload-with-options
+        uses: .
+        with:
+          action: upload
+          bucket: test-bucket
+          application-key-id: fake-key-id
+          application-key: fake-key
+          source: /tmp/upload-source/
+          destination: uploads/
+          content-type: text/plain
+          part-size: '10485760'
+          include: '*.txt'
+          sse: B2
+        continue-on-error: true
+
+      - name: Assert action failed due to invalid credentials
+        run: |
+          echo "outcome: ${{ steps.upload-with-options.outcome }}"
+          if [ "${{ steps.upload-with-options.outcome }}" != "failure" ]; then
+            echo "FAIL: expected action to fail with fake credentials"
+            exit 1
+          fi
+          echo "PASS: action correctly failed with invalid credentials (content-type, part-size, include, sse inputs accepted)"

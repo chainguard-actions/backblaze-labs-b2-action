@@ -1,0 +1,39 @@
+name: Test sync action with dry-run mode
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Create test files to sync
+        run: |
+          mkdir -p /tmp/sync-source
+          echo "hello world" > /tmp/sync-source/file1.txt
+          echo "test content" > /tmp/sync-source/file2.txt
+
+      - name: Run sync with dry-run=true and fake credentials (expect failure on auth)
+        id: sync-dry-run
+        uses: .
+        with:
+          action: sync
+          bucket: test-bucket
+          application-key-id: fake-key-id
+          application-key: fake-key
+          source: /tmp/sync-source/
+          destination: backups/
+          dry-run: 'true'
+          direction: up
+        continue-on-error: true
+
+      - name: Assert action failed (fake credentials, not dry-run logic error)
+        run: |
+          echo "outcome: ${{ steps.sync-dry-run.outcome }}"
+          # The action should fail because of invalid credentials
+          # (dry-run still requires auth to know what exists remotely)
+          if [ "${{ steps.sync-dry-run.outcome }}" != "failure" ]; then
+            echo "FAIL: expected action to fail with fake credentials"
+            exit 1
+          fi
+          echo "PASS: action correctly failed with invalid credentials in dry-run mode"

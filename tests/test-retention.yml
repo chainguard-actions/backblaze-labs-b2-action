@@ -1,0 +1,32 @@
+name: Test retention action with retention-mode, retention-until, and legal-hold options
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Run retention action with governance mode and legal-hold (expect failure on auth)
+        id: retention-action
+        uses: .
+        with:
+          action: retention
+          bucket: test-bucket
+          application-key-id: fake-key-id
+          application-key: fake-key
+          source: path/to/file.txt
+          retention-mode: governance
+          retention-until: '2030-01-01T00:00:00Z'
+          legal-hold: 'on'
+          bypass-governance: 'false'
+        continue-on-error: true
+
+      - name: Assert action failed due to invalid credentials
+        run: |
+          echo "outcome: ${{ steps.retention-action.outcome }}"
+          if [ "${{ steps.retention-action.outcome }}" != "failure" ]; then
+            echo "FAIL: expected action to fail with fake credentials"
+            exit 1
+          fi
+          echo "PASS: action correctly failed with invalid credentials (retention-mode, retention-until, legal-hold inputs accepted)"

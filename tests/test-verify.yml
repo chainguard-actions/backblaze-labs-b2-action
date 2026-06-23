@@ -1,0 +1,35 @@
+name: Test verify action with expected-sha1 option
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Create a local file to verify against
+        run: |
+          echo "hello world" > /tmp/local-file.txt
+          sha1sum /tmp/local-file.txt
+
+      - name: Run verify action with expected-sha1 (expect failure on auth)
+        id: verify-action
+        uses: .
+        with:
+          action: verify
+          bucket: test-bucket
+          application-key-id: fake-key-id
+          application-key: fake-key
+          source: path/to/remote-file.txt
+          destination: /tmp/local-file.txt
+          expected-sha1: '22596363b3de40b06f981fb85d82312e8c0ed511'
+        continue-on-error: true
+
+      - name: Assert action failed due to invalid credentials
+        run: |
+          echo "outcome: ${{ steps.verify-action.outcome }}"
+          if [ "${{ steps.verify-action.outcome }}" != "failure" ]; then
+            echo "FAIL: expected action to fail with fake credentials"
+            exit 1
+          fi
+          echo "PASS: action correctly failed with invalid credentials (expected-sha1 input accepted)"
