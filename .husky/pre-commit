@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Pre-commit: every check, every commit, no path-gating.
+#
+# Earlier we gated each step by staged-file patterns to keep the hook fast.
+# That turned out to be a foot-gun: a workflow tweak committed alongside a
+# src/ change could slip past actionlint. Running everything every time is
+# ~5 s on a clean repo, well worth the safety.
+#
+# Skip with `git commit --no-verify` only if you have a damn good reason.
+
+set -euo pipefail
+
+echo "▸ biome lint"
+pnpm --silent lint
+
+echo "▸ tsc typecheck"
+pnpm --silent typecheck
+
+echo "▸ vitest"
+pnpm --silent test
+
+echo "▸ ncc build (refuses commit if dist/ would change)"
+pnpm --silent build
+if ! git diff --quiet -- dist/; then
+  cat <<'EOF'
+✗ dist/ changed after rebuild and isn't staged. Run:
+    git add dist/
+  then re-commit.
+EOF
+  exit 1
+fi
+
+echo "▸ actionlint"
+pnpm --silent actionlint
+
+echo "▸ cspell"
+pnpm --silent spellcheck
+
+echo "✓ pre-commit OK"

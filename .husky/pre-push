@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Pre-push: the coverage gate. `pnpm test:coverage` runs the full vitest
+# suite under v8 instrumentation, so it subsumes `pnpm test` (which already
+# ran in pre-commit). No reason to run plain `test` again here.
+#
+# Skip with `git push --no-verify` if you really need to.
+
+set -euo pipefail
+
+echo "▸ vitest --coverage"
+pnpm --silent test:coverage
+
+echo "✓ pre-push OK"

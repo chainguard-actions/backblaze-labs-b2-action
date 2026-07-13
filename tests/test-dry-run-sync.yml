@@ -1,0 +1,40 @@
+name: Test dry-run sync
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Create local files to sync
+        run: |
+          mkdir -p /tmp/sync-source
+          echo "hello world" > /tmp/sync-source/hello.txt
+          echo "test file" > /tmp/sync-source/test.txt
+
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          action: sync
+          application-key-id: fake-key-id
+          application-key: fake-key
+          bucket: fake-bucket
+          source: /tmp/sync-source
+          destination: backup/
+          dry-run: 'true'
+          direction: up
+
+      - name: Assert action ran (may fail due to invalid credentials)
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          # The action should either succeed (dry-run) or fail with an auth error
+          # It should NOT be skipped or produce an unexpected outcome
+          if [ "$OUTCOME" = "skipped" ]; then
+            echo "FAIL: action was skipped unexpectedly"
+            exit 1
+          fi
+          echo "PASS: action ran with outcome=$OUTCOME"

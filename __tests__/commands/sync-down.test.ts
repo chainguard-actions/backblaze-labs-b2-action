@@ -1,0 +1,75 @@
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { syncCommand } from '../../src/commands/sync.ts'
+import { uploadCommand } from '../../src/commands/upload.ts'
+import { boundInputs, makeFixture, makeInputs, type TestFixture } from '../_helpers.ts'
+
+describe('sync command (B2 → local)', () => {
+  let fx: TestFixture
+  const inputs = boundInputs('sync', () => fx)
+
+  beforeEach(async () => {
+    fx = await makeFixture('gh-action-syncdown')
+  })
+  afterEach(async () => {
+    await rm(fx.workDir, { recursive: true, force: true })
+  })
+
+  it('downloads all files from a B2 prefix when direction=down', async () => {
+    // First, seed the bucket.
+    for (const name of ['a.txt', 'b.txt', 'sub/c.txt']) {
+      const local = join(fx.workDir, `seed-${name.replace('/', '_')}`)
+      await writeFile(local, `payload-${name}`)
+      await uploadCommand(
+        fx.bucket,
+        makeInputs('upload', fx, {
+          source: local,
+          destination: `dl/${name}`,
+        }),
+      )
+    }
+
+    const dest = join(fx.workDir, 'restored')
+    const result = await syncCommand(
+      fx.bucket,
+      inputs({
+        source: 'dl',
+        destination: dest,
+        syncDirection: 'down',
+      }),
+    )
+
+    expect(result.direction).toBe('b2-to-local')
+    expect(result.downloaded).toBeGreaterThanOrEqual(3)
+    expect(await readFile(join(dest, 'a.txt'), 'utf8')).toBe('payload-a.txt')
+    expect(await readFile(join(dest, 'sub', 'c.txt'), 'utf8')).toBe('payload-sub/c.txt')
+  })
+
+  it('auto-detects direction = down when source is not a local directory', async () => {
+    const local = join(fx.workDir, 'auto.txt')
+    await writeFile(local, 'auto-payload')
+    await uploadCommand(
+      fx.bucket,
+      makeInputs('upload', fx, {
+        source: local,
+        destination: 'auto/auto.txt',
+      }),
+    )
+
+    const dest = join(fx.workDir, 'auto-restore')
+    await mkdir(dest, { recursive: true })
+
+    const result = await syncCommand(
+      fx.bucket,
+      inputs({
+        source: 'auto',
+        destination: dest,
+        syncDirection: 'auto',
+      }),
+    )
+
+    expect(result.direction).toBe('b2-to-local')
+    expect(result.downloaded).toBeGreaterThanOrEqual(1)
+  })
+})
