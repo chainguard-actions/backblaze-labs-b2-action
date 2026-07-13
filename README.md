@@ -1,6 +1,6 @@
 # backblaze-labs/b2-action
 
-Upload, download, sync, copy, and manage Backblaze B2 Cloud Storage from GitHub Actions workflows.
+Thirteen verbs for Backblaze B2: upload, download, sync, copy, delete, list, hide, unhide, verify, presign, retention, head, purge. TypeScript-native, built on the official b2-sdk.
 
 Hardened by [Chainguard](https://www.chainguard.dev) from the upstream action at [https://github.com/backblaze-labs/b2-action](https://github.com/backblaze-labs/b2-action).
 
@@ -8,6 +8,7 @@ Hardened by [Chainguard](https://www.chainguard.dev) from the upstream action at
 
 | Version | Tag | Upstream commit |
 |---------|-----|-----------------|
+| v1.0.0 | [`v1.0.0`](https://github.com/chainguard-actions/backblaze-labs-b2-action/tree/v1.0.0) | [`2646576`](https://github.com/backblaze-labs/b2-action/commit/264657667c98065459b05bd43453271036eeaf14) |
 | v1.0.1 | [`v1.0.1`](https://github.com/chainguard-actions/backblaze-labs-b2-action/tree/v1.0.1) | [`467e8fd`](https://github.com/backblaze-labs/b2-action/commit/467e8fd63ee653b7e56e90d3799a05caa2533cc1) |
 
 ## Privacy
