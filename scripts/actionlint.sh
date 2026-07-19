@@ -26,8 +26,10 @@ if [ -z "$BIN" ]; then
   if [ ! -x "$BIN" ] || [ "$("$BIN" -version 2>/dev/null | head -n1 || true)" != "$ACTIONLINT_VERSION" ]; then
     echo "→ downloading actionlint v${ACTIONLINT_VERSION} to ${CACHE_DIR}"
     cd "$CACHE_DIR"
-    bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash) \
-      "$ACTIONLINT_VERSION" >/dev/null
+    curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash \
+      -o /tmp/download-actionlint.bash
+    bash /tmp/download-actionlint.bash "$ACTIONLINT_VERSION" >/dev/null
+    rm -f /tmp/download-actionlint.bash
     cd - >/dev/null
   fi
 fi

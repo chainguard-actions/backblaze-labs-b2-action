@@ -1,0 +1,75 @@
+name: 'Example: cache artifacts'
+
+# Save and restore a tarball between jobs using B2 instead of actions/cache.
+# Useful when you outgrow GH's per-org cache limit, want shared caches across
+# workflows, or need TTL/lifecycle controls only B2 provides.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  cache:
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'push' || github.event.pull_request.head.repo.fork == false
+    runs-on: ubuntu-latest
+    # We hardcode `Linux` rather than `${{ runner.os }}` because the `runner`
+    # context isn't allowed in job-level `env:` (only at step level). This job
+    # always runs on `ubuntu-latest` so the value is fixed anyway.
+    env:
+      CACHE_KEY: cache/Linux/example-${{ github.run_id }}.tar.gz
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Build a synthetic cache payload
+        run: |
+          mkdir -p _cache
+          dd if=/dev/urandom of=_cache/blob bs=1024 count=128
+          tar -czf payload.tar.gz _cache
+
+      - name: Save cache to B2
+        id: save
+        uses: ./
+        with:
+          action: upload
+          application-key-id: ${{ secrets.B2_APPLICATION_KEY_ID }}
+          application-key: ${{ secrets.B2_APPLICATION_KEY }}
+          bucket: ${{ secrets.B2_TEST_BUCKET }}
+          source: payload.tar.gz
+          destination: ${{ env.CACHE_KEY }}
+
+      - name: Wipe local copy
+        run: rm -rf _cache payload.tar.gz
+
+      - name: Restore cache from B2
+        uses: ./
+        with:
+          action: download
+          application-key-id: ${{ secrets.B2_APPLICATION_KEY_ID }}
+          application-key: ${{ secrets.B2_APPLICATION_KEY }}
+          bucket: ${{ secrets.B2_TEST_BUCKET }}
+          source: ${{ env.CACHE_KEY }}
+          destination: payload.restored.tar.gz
+
+      - name: Verify cache integrity
+        env:
+          SAVE_FILE_ID: ${{ steps.save.outputs.file-id }}
+          SAVE_CONTENT_SHA1: ${{ steps.save.outputs.content-sha1 }}
+        run: |
+          tar -tzf payload.restored.tar.gz | grep _cache/blob
+          echo "Saved file-id: $SAVE_FILE_ID"
+          echo "SHA-1:         $SAVE_CONTENT_SHA1"
+
+      - name: Cleanup
+        if: always()
+        uses: ./
+        with:
+          action: delete
+          application-key-id: ${{ secrets.B2_APPLICATION_KEY_ID }}
+          application-key: ${{ secrets.B2_APPLICATION_KEY }}
+          bucket: ${{ secrets.B2_TEST_BUCKET }}
+          source: ${{ env.CACHE_KEY }}

@@ -1,0 +1,76 @@
+name: 'Example: share build artifact via presigned URL'
+
+# Build something, upload it, and post a presigned download URL as a comment
+# on the PR so reviewers can click through without needing B2 access.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  share:
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'push' || github.event.pull_request.head.repo.fork == false
+    runs-on: ubuntu-latest
+    env:
+      ARTIFACT_KEY: pr-builds/${{ github.run_id }}/build.tar.gz
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Build a synthetic artifact
+        run: |
+          mkdir -p _build
+          cp action.yml _build/
+          cp README.md _build/
+          tar -czf build.tar.gz _build
+
+      - name: Upload to B2
+        uses: ./
+        with:
+          action: upload
+          application-key-id: ${{ secrets.B2_APPLICATION_KEY_ID }}
+          application-key: ${{ secrets.B2_APPLICATION_KEY }}
+          bucket: ${{ secrets.B2_TEST_BUCKET }}
+          source: build.tar.gz
+          destination: ${{ env.ARTIFACT_KEY }}
+
+      - name: Generate presigned download URL (valid 1h)
+        id: link
+        uses: ./
+        with:
+          action: presign
+          application-key-id: ${{ secrets.B2_APPLICATION_KEY_ID }}
+          application-key: ${{ secrets.B2_APPLICATION_KEY }}
+          bucket: ${{ secrets.B2_TEST_BUCKET }}
+          source: ${{ env.ARTIFACT_KEY }}
+          presign-ttl: 3600
+
+      - name: Comment URL on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        env:
+          ARTIFACT_URL: ${{ steps.link.outputs.presigned-url }}
+        with:
+          script: |
+            const url = process.env.ARTIFACT_URL
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `Build artifact for this PR: [\`build.tar.gz\`](${url}) (valid 1 hour)`
+            })
+
+      - name: Cleanup
+        if: always()
+        uses: ./
+        with:
+          action: delete
+          application-key-id: ${{ secrets.B2_APPLICATION_KEY_ID }}
+          application-key: ${{ secrets.B2_APPLICATION_KEY }}
+          bucket: ${{ secrets.B2_TEST_BUCKET }}
+          source: ${{ env.ARTIFACT_KEY }}
