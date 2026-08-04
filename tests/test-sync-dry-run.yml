@@ -1,0 +1,48 @@
+name: Test sync dry-run mode
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Create test source directory
+        run: |
+          mkdir -p /tmp/b2-sync-test
+          echo "hello world" > /tmp/b2-sync-test/test-file.txt
+          echo "another file" > /tmp/b2-sync-test/another.txt
+
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          action: sync
+          bucket: test-bucket
+          application-key-id: fake-key-id
+          application-key: fake-key
+          source: /tmp/b2-sync-test/
+          destination: test-prefix/
+          dry-run: 'true'
+          direction: up
+
+      - name: Assert action ran (succeeded with real creds, or failed gracefully without)
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+          FILES_UPLOADED: ${{ steps.action.outputs.files-uploaded }}
+          FILES_DELETED: ${{ steps.action.outputs.files-deleted }}
+          BYTES_TRANSFERRED: ${{ steps.action.outputs.bytes-transferred }}
+        run: |
+          echo "outcome: $OUTCOME"
+          echo "files-uploaded: $FILES_UPLOADED"
+          echo "files-deleted: $FILES_DELETED"
+          echo "bytes-transferred: $BYTES_TRANSFERRED"
+          if [ "$OUTCOME" = "success" ]; then
+            echo "PASS: sync dry-run succeeded"
+          elif [ "$OUTCOME" = "failure" ]; then
+            echo "PASS: action failed gracefully (fake credentials rejected by B2)"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi

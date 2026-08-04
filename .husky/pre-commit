@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Pre-commit: local code checks, every commit, no path-gating.
+#
+# Workflow security checks live in .github/workflows/security.yml through the
+# shared backblaze-labs/github-actions composite action, so this hook stays
+# focused on repo-local code and docs.
+#
+# Skip with `git commit --no-verify` only if you have a damn good reason.
+
+set -euo pipefail
+
+echo "▸ biome lint"
+pnpm --silent lint
+
+echo "▸ release provenance policy"
+pnpm --silent check:release-provenance
+
+echo "▸ tsc typecheck"
+pnpm --silent typecheck
+
+echo "▸ vitest"
+pnpm --silent test
+
+echo "▸ ncc build (refuses commit if dist/ would change)"
+pnpm --silent build
+if ! git diff --quiet -- dist/; then
+  cat <<'EOF'
+✗ dist/ changed after rebuild and isn't staged. Run:
+    git add dist/
+  then re-commit.
+EOF
+  exit 1
+fi
+
+echo "▸ cspell"
+pnpm --silent spellcheck
+
+echo "✓ pre-commit OK"

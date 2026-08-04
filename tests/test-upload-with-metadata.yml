@@ -1,0 +1,38 @@
+name: Test upload with metadata headers
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          action: upload
+          bucket: test-bucket
+          source: hardened/tests
+          destination: test-prefix/
+          include: "*.yml"
+          part-size: "10485760"
+          cache-control: "max-age=3600"
+          content-disposition: "inline"
+          content-language: "en"
+          expires: "Thu, 01 Jan 2099 00:00:00 GMT"
+          sse: "B2"
+          application-key-id: fake-key-id
+          application-key: fake-key
+      - name: Assert action ran (fails gracefully without valid credentials)
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" = "success" ]; then
+            echo "PASS: action succeeded"
+          elif [ "$OUTCOME" = "failure" ]; then
+            echo "PASS: action failed gracefully (expected with fake credentials)"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi

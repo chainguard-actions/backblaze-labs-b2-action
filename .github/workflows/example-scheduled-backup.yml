@@ -1,0 +1,69 @@
+name: 'Example: scheduled backup (cron + SSE-B2 + governance retention)'
+
+# Daily cron that captures a small payload, uploads with SSE-B2, and applies a
+# 7-day governance retention. The bucket must have Object Lock enabled
+# (`B2_TEST_BUCKET_LOCKED`).
+
+on:
+  workflow_dispatch:
+  # Daily 03:17 UTC. Tweak as needed.
+  schedule:
+    - cron: '17 3 * * *'
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backup:
+    name: backup
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || github.event_name == 'push' || (github.event.pull_request.head.repo.fork == false && github.actor != 'dependabot[bot]')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Build snapshot payload
+        id: payload
+        run: |
+          mkdir -p _snapshot
+          date -u > _snapshot/timestamp.txt
+          uname -a > _snapshot/host.txt
+          tar -czf snapshot.tar.gz _snapshot
+          key="backups/${GITHUB_RUN_ID}/snapshot-$(date -u +%Y%m%d).tar.gz"
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+          # 7-day governance horizon as an ISO-8601 UTC timestamp. macOS `date`
+          # doesn't accept `-d`, so compute via `date -v` on BSD and `date -d`
+          # on GNU. ubuntu-latest is GNU.
+          retain_until=$(date -u -d '+7 days' '+%Y-%m-%dT%H:%M:%SZ')
+          echo "retain_until=$retain_until" >> "$GITHUB_OUTPUT"
+
+      - name: Upload (SSE-B2)
+        uses: ./
+        with:
+          action: upload
+          application-key-id: ${{ secrets.B2_APPLICATION_KEY_ID }}
+          application-key: ${{ secrets.B2_APPLICATION_KEY }}
+          bucket: ${{ secrets.B2_TEST_BUCKET_LOCKED }}
+          source: snapshot.tar.gz
+          destination: ${{ steps.payload.outputs.key }}
+          sse: B2
+
+      - name: Apply 7-day governance retention
+        uses: ./
+        with:
+          action: retention
+          application-key-id: ${{ secrets.B2_APPLICATION_KEY_ID }}
+          application-key: ${{ secrets.B2_APPLICATION_KEY }}
+          bucket: ${{ secrets.B2_TEST_BUCKET_LOCKED }}
+          source: ${{ steps.payload.outputs.key }}
+          retention-mode: governance
+          retention-until: ${{ steps.payload.outputs.retain_until }}
+        continue-on-error: true   # PR runs without a locked bucket simply skip

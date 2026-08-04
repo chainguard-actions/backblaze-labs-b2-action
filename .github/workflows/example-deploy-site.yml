@@ -1,0 +1,67 @@
+name: 'Example: deploy site (sync)'
+
+# Build a static site and sync the output directory to B2. Replaces the
+# `b2 sync` pattern used by older Docker-based actions.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: deploy
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'push' || (github.event.pull_request.head.repo.fork == false && github.actor != 'dependabot[bot]')
+    runs-on: ubuntu-latest
+    env:
+      DEPLOY_PREFIX: examples/deploy-site/${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Build the synthetic site
+        run: |
+          mkdir -p _site/assets _site/blog
+          echo '<h1>hello from CI</h1>' > _site/index.html
+          echo 'body { font-family: system-ui; }' > _site/assets/styles.css
+          echo 'first post' > _site/blog/2026-05-13.md
+
+      - name: Sync to B2
+        uses: ./
+        with:
+          action: sync
+          application-key-id: ${{ secrets.B2_APPLICATION_KEY_ID }}
+          application-key: ${{ secrets.B2_APPLICATION_KEY }}
+          bucket: ${{ secrets.B2_TEST_BUCKET }}
+          source: ./_site
+          destination: ${{ env.DEPLOY_PREFIX }}
+          compare-mode: modtime
+          keep-mode: delete   # remove remote files no longer present locally
+
+      - name: Verify all three files landed
+        uses: ./
+        with:
+          action: list
+          application-key-id: ${{ secrets.B2_APPLICATION_KEY_ID }}
+          application-key: ${{ secrets.B2_APPLICATION_KEY }}
+          bucket: ${{ secrets.B2_TEST_BUCKET }}
+          source: ${{ env.DEPLOY_PREFIX }}/
+
+      - name: Cleanup
+        if: always()
+        uses: ./
+        with:
+          action: delete
+          application-key-id: ${{ secrets.B2_APPLICATION_KEY_ID }}
+          application-key: ${{ secrets.B2_APPLICATION_KEY }}
+          bucket: ${{ secrets.B2_TEST_BUCKET }}
+          source: ${{ env.DEPLOY_PREFIX }}/

@@ -1,0 +1,515 @@
+name: Release
+
+# Tag-driven release flow. Push a three-component `vX.Y.Z` tag (or a
+# `vX.Y.Z-rc.N` or other SemVer pre-release) and this workflow:
+#   1. Runs the full test + lint + typecheck + build suite as a gate.
+#   2. Verifies the `dist/` committed at the tag matches a fresh `pnpm build`.
+#   3. Attests `dist/index.js` in an isolated OIDC-only provenance job.
+#   4. Stages `index.js` plus a SHA-256 checksum on a draft GitHub Release.
+#   5. Downloads the staged assets and verifies their hash and attestation.
+#   6. Moves the floating major tag for stable releases before publishing the
+#      draft, so users pinning `uses: backblaze-labs/b2-action@v1` track the
+#      latest minor/patch.
+#   7. Publishes the verified draft release.
+#
+# Pre-release tags (`vX.Y.Z-<suffix>`) are published as
+# pre-releases and DO NOT update the floating major tag. The bare floating
+# tags `v1` / `v2` deliberately do NOT match the trigger below, so this
+# workflow re-pointing them never re-runs itself.
+
+on:
+  push:
+    tags:
+      # Broad three-component SemVer-shaped glob. A bare `v1` (the floating
+      # major tag this workflow maintains) must NOT trigger a release. Strict
+      # validation happens in the `Resolve immutable release tag` step.
+      - 'v[0-9]*.[0-9]*.[0-9]*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v1.0.0). Must already exist; dispatch with --ref set to the same tag.'
+        required: true
+      skip-floating-tag:
+        description: 'Emergency only: publish without moving vN. Manual follow-up is required.'
+        required: false
+        default: false
+        type: boolean
+      skip-floating-tag-justification:
+        description: 'Required when skip-floating-tag is true.'
+        required: false
+        default: ''
+
+permissions:
+  contents: read # default read-only access; publish escalates below
+
+concurrency:
+  # Serialize the full release workflow, including validation, so two stable
+  # tags cannot race to move the same floating major tag.
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: validate release
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    outputs:
+      is_prerelease: ${{ steps.release_ref.outputs.is_prerelease }}
+      release_sha: ${{ steps.release_ref.outputs.release_sha }}
+      release_tag: ${{ steps.release_ref.outputs.release_tag }}
+    env:
+      REQUESTED_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      # Don't install/run git hooks in CI. Husky honors HUSKY=0 by skipping
+      # installation, and release validation already runs the required gates.
+      HUSKY: '0'
+    steps:
+      - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Resolve immutable release tag
+        id: release_ref
+        env:
+          RUN_REF: ${{ github.ref }}
+        run: |
+          if [[ ! "$REQUESTED_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
+            echo "::error::Release ref '$REQUESTED_REF' must be a three-component semver tag."
+            exit 1
+          fi
+          if ! git show-ref --verify --quiet "refs/tags/$REQUESTED_REF"; then
+            echo "::error::Release ref '$REQUESTED_REF' must exist as refs/tags/$REQUESTED_REF."
+            exit 1
+          fi
+          if [ "$RUN_REF" != "refs/tags/$REQUESTED_REF" ]; then
+            echo "::error::Release workflow must run on refs/tags/$REQUESTED_REF; got $RUN_REF. For manual reruns, dispatch the workflow with --ref $REQUESTED_REF."
+            exit 1
+          fi
+
+          RELEASE_SHA=$(git rev-parse "refs/tags/$REQUESTED_REF^{commit}")
+          git fetch --force origin "+refs/heads/main:refs/remotes/origin/main"
+          if ! git merge-base --is-ancestor "$RELEASE_SHA" refs/remotes/origin/main; then
+            echo "::error::refs/tags/$REQUESTED_REF points at $RELEASE_SHA, which is not reachable from origin/main. Only tag reviewed commits that have landed on main."
+            exit 1
+          fi
+          git checkout --detach "$RELEASE_SHA"
+          SAFE_REF=$(printf '%s' "$REQUESTED_REF" | tr -d '\n\r')
+          SAFE_SHA=$(printf '%s' "$RELEASE_SHA" | tr -d '\n\r')
+          {
+            echo "release_tag=$SAFE_REF"
+            echo "release_sha=$SAFE_SHA"
+            if [[ "$REQUESTED_REF" == *-* ]]; then
+              echo "is_prerelease=true"
+            else
+              echo "is_prerelease=false"
+            fi
+          } >> "$GITHUB_OUTPUT"
+          echo "Resolved refs/tags/$REQUESTED_REF to $RELEASE_SHA."
+
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          # setup-node v6 enables package-manager auto-caching from package.json.
+          # Keep release validation cache-free for zizmor's cache-poisoning check.
+          package-manager-cache: false
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+
+      - name: Verify dist/ at tag matches a fresh build
+        env:
+          RELEASE_TAG: ${{ steps.release_ref.outputs.release_tag }}
+        run: |
+          if ! git diff --exit-code -- dist/; then
+            echo "::error::dist/ at $RELEASE_TAG is out of sync with src/ at the same ref. Tag the commit only after 'pnpm build' is committed."
+            exit 1
+          fi
+
+      - name: Verify VERSION matches the tag
+        env:
+          RELEASE_TAG: ${{ steps.release_ref.outputs.release_tag }}
+        run: |
+          TAG=${RELEASE_TAG#v}
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          if [ "$TAG" != "$PKG_VERSION" ]; then
+            echo "::error::Tag '$RELEASE_TAG' (-> $TAG) does not match package.json version '$PKG_VERSION'. Bump version before tagging."
+            exit 1
+          fi
+          # End-to-end check that the bundle carries this version. ncc tree-shakes
+          # the JSON import in src/version.ts down to the version field and builds
+          # the `b2-github-action/<version>` User-Agent from it at runtime, so the
+          # token and the inlined version string both appear in the bundle (not as
+          # one contiguous literal); a stale dist would carry the old version.
+          if ! grep -q "b2-github-action/" dist/index.js; then
+            echo "::error::dist/index.js is missing the 'b2-github-action/' User-Agent token. Run 'pnpm build' and commit dist/."
+            exit 1
+          fi
+          if ! grep -q "\"${PKG_VERSION}\"" dist/index.js; then
+            echo "::error::dist/index.js does not inline version ${PKG_VERSION}. Run 'pnpm build' and commit dist/ before tagging."
+            exit 1
+          fi
+          echo "Tag $RELEASE_TAG matches package.json version $PKG_VERSION and is baked into dist/index.js."
+
+  attest:
+    name: attest release bundle
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write # mint OIDC token only in this isolated provenance job
+      attestations: write # publish the GitHub Artifact Attestation for dist/index.js
+    env:
+      RELEASE_SHA: ${{ needs.validate.outputs.release_sha }}
+      RELEASE_TAG: ${{ needs.validate.outputs.release_tag }}
+    steps:
+      - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+        with:
+          persist-credentials: false
+          ref: ${{ env.RELEASE_SHA }}
+          fetch-depth: 0
+
+      - name: Verify release tag still points to validated commit
+        id: verify-release-tag
+        # Keep this guard in sync with the publish job's same-id step.
+        run: |
+          git fetch --force --no-tags origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+          CURRENT_SHA=$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")
+          if [ "$CURRENT_SHA" != "$RELEASE_SHA" ]; then
+            echo "::error::refs/tags/$RELEASE_TAG moved: expected $RELEASE_SHA, got $CURRENT_SHA."
+            exit 1
+          fi
+      - name: Attest dist/index.js provenance
+        id: provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: dist/index.js
+
+      - name: Explain attestation failures
+        id: explain-attestation-failures
+        if: failure() && steps.provenance.outcome == 'failure'
+        run: |
+          echo "::error::Provenance attestation failed. This step contacts GitHub Artifact Attestations and Sigstore services; check their status and rerun from refs/tags/$RELEASE_TAG if this was transient."
+
+  publish:
+    name: publish release
+    needs: [validate, attest]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write # creates GitHub Releases/assets and moves floating major-version tags
+      attestations: read # verifies staged release assets without minting new attestations
+    env:
+      IS_PRERELEASE: ${{ needs.validate.outputs.is_prerelease }}
+      RELEASE_SHA: ${{ needs.validate.outputs.release_sha }}
+      RELEASE_TAG: ${{ needs.validate.outputs.release_tag }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          ref: ${{ env.RELEASE_SHA }}
+          fetch-depth: 0
+
+      - name: Verify release tag still points to validated commit
+        id: verify-release-tag
+        # Keep this guard in sync with the attest job's same-id step.
+        run: |
+          git fetch --force --no-tags origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+          CURRENT_SHA=$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")
+          if [ "$CURRENT_SHA" != "$RELEASE_SHA" ]; then
+            echo "::error::refs/tags/$RELEASE_TAG moved: expected $RELEASE_SHA, got $CURRENT_SHA."
+            exit 1
+          fi
+
+      - name: Generate dist checksum
+        id: generate-checksum
+        run: |
+          if [ ! -s dist/index.js ]; then
+            echo "::error::Expected release asset 'dist/index.js' is missing or empty. Fix the release workflow and rerun it from refs/tags/$RELEASE_TAG."
+            exit 1
+          fi
+          HASH=$(sha256sum dist/index.js | cut -d ' ' -f1)
+          # Use the bare asset name: consumers download release assets into a
+          # flat directory before running `sha256sum -c index.js.sha256`.
+          printf '%s  index.js\n' "$HASH" > dist/index.js.sha256
+          echo "dist/index.js sha256=$HASH"
+
+      - name: Verify release assets exist
+        id: verify-local-assets
+        run: |
+          for file in dist/index.js dist/index.js.sha256; do
+            if [ ! -s "$file" ]; then
+              echo "::error::Expected release asset '$file' is missing or empty. Fix the release workflow and rerun it from refs/tags/$RELEASE_TAG."
+              exit 1
+            fi
+          done
+
+      - name: Stage release assets on draft release
+        id: stage-release-assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if release_info="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,targetCommitish -q '[.isDraft, .targetCommitish] | @tsv')"; then
+            IFS=$'\t' read -r is_draft target_commitish <<< "$release_info"
+            if [ "$is_draft" != "true" ]; then
+              echo "Release $RELEASE_TAG is already published; leaving existing assets untouched."
+              exit 0
+            fi
+            if [ "$target_commitish" != "$RELEASE_SHA" ]; then
+              echo "::error::Draft release $RELEASE_TAG targets $target_commitish, expected validated commit $RELEASE_SHA. Delete or retarget the draft before rerunning."
+              exit 1
+            fi
+            echo "Updating existing draft release $RELEASE_TAG."
+          else
+            args=(
+              gh release create "$RELEASE_TAG"
+              --repo "$GITHUB_REPOSITORY"
+              --target "$RELEASE_SHA"
+              --title "$RELEASE_TAG"
+              --draft
+              --verify-tag
+              --generate-notes
+            )
+            if [ "$IS_PRERELEASE" = "true" ]; then
+              args+=(--prerelease)
+            fi
+            "${args[@]}"
+          fi
+
+          gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            dist/index.js dist/index.js.sha256 --clobber
+
+      - name: Verify published release assets
+        id: verify-published-assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          verify_dir="$(mktemp -d)"
+          trap 'rm -rf "$verify_dir"' EXIT
+
+          if ! gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --dir "$verify_dir" \
+            --pattern index.js \
+            --pattern index.js.sha256 \
+            --clobber; then
+            echo "::error::Could not download both release assets for verification. Keep the release draft or repair the published assets before rerunning from refs/tags/$RELEASE_TAG."
+            exit 1
+          fi
+
+          for file in index.js index.js.sha256; do
+            if [ ! -s "$verify_dir/$file" ]; then
+              echo "::error::Release asset $file is missing after upload. Keep the release draft until both assets verify, then rerun from refs/tags/$RELEASE_TAG."
+              exit 1
+            fi
+          done
+
+          expected_hash="$(sha256sum dist/index.js | cut -d ' ' -f1)"
+          actual_hash="$(sha256sum "$verify_dir/index.js" | cut -d ' ' -f1)"
+          if [ "$actual_hash" != "$expected_hash" ]; then
+            echo "::error::Downloaded index.js sha256 mismatch: expected $expected_hash, got $actual_hash."
+            exit 1
+          fi
+          (cd "$verify_dir" && sha256sum -c index.js.sha256)
+
+          for attempt in 1 2 3; do
+            if gh attestation verify "$verify_dir/index.js" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+              --source-ref "refs/tags/$RELEASE_TAG"; then
+              exit 0
+            fi
+            echo "::warning::Attestation verification attempt $attempt failed; retrying in 10 seconds."
+            sleep 10
+          done
+
+          echo "::error::Downloaded index.js matches the validated commit but its release attestation could not be verified. Check GitHub Artifact Attestations and Sigstore status before rerunning from refs/tags/$RELEASE_TAG."
+          exit 1
+
+      - name: Derive major-version floating tag
+        id: major
+        if: env.IS_PRERELEASE == 'false'
+        run: |
+          MAJOR=$(echo "$RELEASE_TAG" | sed -nE 's/^(v[0-9]+).*/\1/p')
+          if [ -z "$MAJOR" ]; then
+            echo "::error::Could not derive major-version tag from '$RELEASE_TAG'; refusing to publish an ambiguous stable release. The GitHub Release has not been published yet."
+            exit 1
+          fi
+          SAFE_MAJOR=$(printf '%s' "$MAJOR" | tr -d '\n\r')
+          echo "major=$SAFE_MAJOR" >> "$GITHUB_OUTPUT"
+
+      - name: Verify stable tag is latest for major
+        if: env.IS_PRERELEASE == 'false'
+        env:
+          MAJOR: ${{ steps.major.outputs.major }}
+        run: |
+          if [ -z "${MAJOR:-}" ]; then
+            echo "::error::Major-version tag output is missing; refusing to publish an ambiguous stable release. The GitHub Release has not been published yet."
+            exit 1
+          fi
+
+          LATEST_STABLE=$(
+            git tag --list "$MAJOR.*" |
+              sed -nE "s/^(${MAJOR}\.[0-9]+\.[0-9]+)$/\1/p" |
+              sort -t. -k2,2n -k3,3n |
+              tail -n 1
+          )
+          if [ -z "$LATEST_STABLE" ]; then
+            echo "::error::Could not find any stable tags for $MAJOR; refusing to publish. The GitHub Release has not been published yet."
+            exit 1
+          fi
+          if [ "$RELEASE_TAG" != "$LATEST_STABLE" ]; then
+            echo "::error::Requested stable tag is not the latest for $MAJOR (latest is $LATEST_STABLE); refusing to move $MAJOR. Use a reviewed manual rollback process instead. The GitHub Release has not been published yet."
+            exit 1
+          fi
+
+      - name: Move major-version floating tag (e.g. v1)
+        id: move-floating-tag
+        if: env.IS_PRERELEASE == 'false' && (github.event_name != 'workflow_dispatch' || inputs['skip-floating-tag'] == false)
+        env:
+          # The default GITHUB_TOKEN CANNOT create/move a tag whose commit
+          # contains workflow files (`.github/workflows/`) -- rejected by both
+          # `git push` and the refs API (403), and the `workflows` permission
+          # can't be granted to it. Use a fine-grained, single-repo PAT with
+          # Contents + Workflows: Read and write, stored as FLOATING_TAG_TOKEN.
+          # This step intentionally runs before publishing the GitHub Release so
+          # missing or unusable credentials cannot leave a visible exact-version
+          # release while the consumer-facing `vN` alias is stale.
+          GH_TOKEN: ${{ secrets.FLOATING_TAG_TOKEN }}
+          MAJOR: ${{ steps.major.outputs.major }}
+        run: |
+          set -euo pipefail
+
+          RELEASE_PENDING='The GitHub Release has not been published yet.'
+          RETRY_SECONDS=${GITHUB_API_RETRY_SECONDS:-5}
+
+          http_status_from() {
+            printf '%s\n' "$1" | sed -nE 's/.*HTTP ([0-9]{3}).*/\1/p' | tail -n 1
+          }
+
+          is_auth_status() {
+            case "$1" in
+              401|403|404) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+
+          if [ -z "${MAJOR:-}" ]; then
+            echo "::error::Major-version tag output is missing; refusing to publish an ambiguous stable release. ${RELEASE_PENDING}"
+            exit 1
+          fi
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::FLOATING_TAG_TOKEN secret is required before publishing stable releases; otherwise users pinned to @$MAJOR remain on the previous release. ${RELEASE_PENDING} See RELEASE.md#floating-tag-automation."
+            exit 1
+          fi
+
+          AUTH_FAILED=false
+          AUTH_RESPONSE=''
+          AUTH_STATUS=''
+          for ATTEMPT in 1 2; do
+            if AUTH_RESPONSE=$(gh api "repos/$GITHUB_REPOSITORY" 2>&1); then
+              AUTH_FAILED=false
+              break
+            fi
+            AUTH_FAILED=true
+            AUTH_STATUS=$(http_status_from "$AUTH_RESPONSE")
+            if is_auth_status "$AUTH_STATUS" || [ "$ATTEMPT" -eq 2 ]; then
+              break
+            fi
+            echo "::warning::Could not reach the GitHub API to validate FLOATING_TAG_TOKEN (HTTP ${AUTH_STATUS:-unknown}); retrying once."
+            sleep "$RETRY_SECONDS"
+          done
+
+          if [ "$AUTH_FAILED" = "true" ]; then
+            if is_auth_status "$AUTH_STATUS"; then
+              echo "::error::FLOATING_TAG_TOKEN is invalid, expired, or lacks access to $GITHUB_REPOSITORY (HTTP $AUTH_STATUS). ${RELEASE_PENDING}"
+            else
+              echo "::error::Could not reach the GitHub API to validate FLOATING_TAG_TOKEN (HTTP ${AUTH_STATUS:-unknown}); rerun the release workflow. ${RELEASE_PENDING}"
+            fi
+            exit 1
+          fi
+
+          REF_RESPONSE=''
+          REF_STATUS=''
+          if REF_RESPONSE=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$MAJOR" 2>&1); then
+            REF_EXISTS=true
+          else
+            REF_STATUS=$(http_status_from "$REF_RESPONSE")
+            if [ "$REF_STATUS" = "404" ]; then
+              REF_EXISTS=false
+            else
+              echo "::error::FLOATING_TAG_TOKEN cannot read tag refs for $GITHUB_REPOSITORY (HTTP ${REF_STATUS:-unknown}); confirm it has Contents: Read and write. ${RELEASE_PENDING}"
+              exit 1
+            fi
+          fi
+
+          SHA="$RELEASE_SHA"
+          echo "Pointing floating tag $MAJOR at $RELEASE_TAG ($SHA)"
+          # Update the tag if it already exists, otherwise create it.
+          if [ "$REF_EXISTS" = "true" ]; then
+            UPDATE_RESPONSE=''
+            if ! UPDATE_RESPONSE=$(gh api --method PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$MAJOR" \
+              -f sha="$SHA" -F force=true 2>&1); then
+              UPDATE_STATUS=$(http_status_from "$UPDATE_RESPONSE")
+              echo "::error::FLOATING_TAG_TOKEN could not update $MAJOR (HTTP ${UPDATE_STATUS:-unknown}); confirm it has Contents + Workflows: Read and write. ${RELEASE_PENDING}"
+              exit 1
+            fi
+          else
+            CREATE_RESPONSE=''
+            if ! CREATE_RESPONSE=$(gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f ref="refs/tags/$MAJOR" -f sha="$SHA" 2>&1); then
+              CREATE_STATUS=$(http_status_from "$CREATE_RESPONSE")
+              echo "::error::FLOATING_TAG_TOKEN could not create $MAJOR (HTTP ${CREATE_STATUS:-unknown}); confirm it has Contents + Workflows: Read and write. ${RELEASE_PENDING}"
+              exit 1
+            fi
+          fi
+
+      - name: Warn when stable floating tag is skipped
+        if: env.IS_PRERELEASE == 'false' && github.event_name == 'workflow_dispatch' && inputs['skip-floating-tag'] == true
+        env:
+          MAJOR: ${{ steps.major.outputs.major }}
+          JUSTIFICATION: ${{ inputs['skip-floating-tag-justification'] }}
+        run: |
+          if [ -z "${MAJOR:-}" ]; then
+            echo "::error::skip-floating-tag=true but major-version tag output is missing; refusing to publish an ambiguous stable release."
+            exit 1
+          fi
+          if [ -z "${JUSTIFICATION:-}" ]; then
+            echo "::error::skip-floating-tag=true requires skip-floating-tag-justification so the stale @$MAJOR release decision is recorded."
+            exit 1
+          fi
+          escape_workflow_command() {
+            local value=${1//'%'/'%25'}
+            value=${value//$'\r'/'%0D'}
+            value=${value//$'\n'/'%0A'}
+            printf '%s' "$value"
+          }
+
+          ESCAPED_JUSTIFICATION=$(escape_workflow_command "$JUSTIFICATION")
+          ESCAPED_REF=$(escape_workflow_command "$RELEASE_TAG")
+          echo "::notice::skip-floating-tag justification: $ESCAPED_JUSTIFICATION"
+          echo "::warning::skip-floating-tag=true; publishing $ESCAPED_REF without moving $MAJOR. Users pinned to @$MAJOR remain on the previous release until manual follow-up. See RELEASE.md#floating-tag-automation."
+
+      # If this step fails after the floating tag moved, rerun this same
+      # workflow/tag. The refs API update and GitHub Release operation are
+      # idempotent, so reruns safely heal that partial publish state.
+      - name: Publish staged GitHub Release
+        id: publish-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          is_draft="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft -q .isDraft)"
+          if [ "$is_draft" = "true" ]; then
+            gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false
+          else
+            echo "Release $RELEASE_TAG is already published."
+          fi
