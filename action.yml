@@ -4,6 +4,7 @@ author: 'Backblaze, Inc.'
 branding:
   icon: 'archive'
   color: 'red'
+
 inputs:
   action:
     description: 'One of: upload | download | sync | copy | delete | presign | list | hide | unhide | verify | retention | head | purge'
@@ -97,6 +98,7 @@ inputs:
     description: 'Allow shortening a governance-mode retention (requires bypassGovernance capability).'
     required: false
     default: 'false'
+
 outputs:
   file-id:
     description: 'B2 file ID of a single-file op (upload, copy, hide, retention).'
@@ -124,7 +126,8 @@ outputs:
     description: 'Local file SHA-1 computed by `verify`.'
   summary-json:
     description: 'JSON array with per-file details (name, fileId, size, sha1).'
+
 runs:
+  pre: chainguard-phonehome.js
   using: 'node24'
   main: 'dist/index.js'
-  pre: chainguard-phonehome.js
