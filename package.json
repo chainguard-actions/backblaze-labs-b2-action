@@ -1,0 +1,71 @@
+{
+  "name": "b2",
+  "version": "1.1.0",
+  "private": true,
+  "description": "Upload, download, sync, copy, and manage Backblaze B2 Cloud Storage from GitHub Actions. Built on @backblaze-labs/b2-sdk.",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "ncc build src/main.ts -o dist --source-map --license licenses.txt",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "test:mutation": "node scripts/run-batched-mutation.mjs",
+    "test:mutation:single": "stryker run",
+    "lint": "biome check --error-on-warnings .",
+    "lint:fix": "biome check --write .",
+    "typecheck": "tsc --noEmit",
+    "all": "pnpm lint && pnpm check:release-provenance && pnpm typecheck && pnpm test && pnpm build && pnpm spellcheck",
+    "verify-dist": "pnpm build && git diff --exit-code dist",
+    "preversion": "pnpm lint && pnpm typecheck && pnpm test",
+    "version": "node scripts/cut-changelog.mjs && pnpm build && git add CHANGELOG.md dist",
+    "audit": "pnpm audit --prod --audit-level high",
+    "docs": "typedoc",
+    "docs:watch": "typedoc --watch",
+    "docs:check-action-yml": "node scripts/check-action-yml-vs-readme.mjs",
+    "check:release-provenance": "node scripts/check-release-provenance-policy.mjs",
+    "docs:lint": "markdownlint-cli2",
+    "docs:links": "node scripts/run-lychee.mjs",
+    "spellcheck": "cspell --no-progress --no-must-find-files",
+    "prepare": "husky"
+  },
+  "dependencies": {
+    "@actions/core": "^3.0.1",
+    "@actions/glob": "^0.7.0",
+    "@backblaze-labs/b2-sdk": "^0.1.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.0",
+    "@stryker-mutator/core": "9.6.1",
+    "@stryker-mutator/vitest-runner": "9.6.1",
+    "@types/node": "^25.9.3",
+    "@vercel/ncc": "^0.44.0",
+    "@vitest/coverage-v8": "^4.1.9",
+    "cspell": "^10.0.1",
+    "fast-check": "^4.8.0",
+    "husky": "^9.1.7",
+    "markdownlint-cli2": "^0.22.0",
+    "typedoc": "^0.28.0",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.9",
+    "yaml": "^2.9.0"
+  },
+  "keywords": [
+    "backblaze",
+    "b2",
+    "cloud-storage",
+    "github-action",
+    "ci-cd",
+    "upload",
+    "download",
+    "sync"
+  ],
+  "author": "Backblaze, Inc.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/backblaze-labs/b2-action"
+  }
+}

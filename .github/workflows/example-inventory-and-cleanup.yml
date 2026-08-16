@@ -1,0 +1,94 @@
+name: 'Example: inventory & cleanup (list + delete dry-run)'
+
+# Catalogue files under a prefix as JSON, then preview a cleanup with
+# dry-run before doing the actual delete. The list output is also useful
+# as input to a downstream "find stale assets" job.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  inventory:
+    name: inventory
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'push' || (github.event.pull_request.head.repo.fork == false && github.actor != 'dependabot[bot]')
+    runs-on: ubuntu-latest
+    env:
+      PREFIX: examples/inventory/${{ github.run_id }}/
+    steps:
+      - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Seed the prefix with a few files
+        run: |
+          mkdir -p _seed
+          for i in 1 2 3 4 5; do
+            echo "payload-$i" > "_seed/asset-$i.txt"
+          done
+
+      - name: Upload seed files
+        uses: ./
+        with:
+          action: sync
+          application-key-id: ${{ secrets.B2_APPLICATION_KEY_ID }}
+          application-key: ${{ secrets.B2_APPLICATION_KEY }}
+          bucket: ${{ secrets.B2_TEST_BUCKET }}
+          source: ./_seed
+          destination: ${{ env.PREFIX }}
+
+      - name: List inventory
+        id: inv
+        uses: ./
+        with:
+          action: list
+          application-key-id: ${{ secrets.B2_APPLICATION_KEY_ID }}
+          application-key: ${{ secrets.B2_APPLICATION_KEY }}
+          bucket: ${{ secrets.B2_TEST_BUCKET }}
+          source: ${{ env.PREFIX }}
+
+      - name: Show inventory JSON
+        env:
+          INVENTORY: ${{ steps.inv.outputs.summary-json }}
+          FILES_LISTED: ${{ steps.inv.outputs.files-listed }}
+        run: |
+          echo "$INVENTORY" | head -c 4000
+          echo "Files listed: $FILES_LISTED"
+          test "$FILES_LISTED" = "5"
+
+      - name: Preview cleanup (dry-run)
+        uses: ./
+        with:
+          action: delete
+          application-key-id: ${{ secrets.B2_APPLICATION_KEY_ID }}
+          application-key: ${{ secrets.B2_APPLICATION_KEY }}
+          bucket: ${{ secrets.B2_TEST_BUCKET }}
+          source: ${{ env.PREFIX }}
+          dry-run: true
+
+      - name: Actual cleanup
+        uses: ./
+        with:
+          action: delete
+          application-key-id: ${{ secrets.B2_APPLICATION_KEY_ID }}
+          application-key: ${{ secrets.B2_APPLICATION_KEY }}
+          bucket: ${{ secrets.B2_TEST_BUCKET }}
+          source: ${{ env.PREFIX }}
+
+      - name: Confirm empty
+        uses: ./
+        with:
+          action: list
+          application-key-id: ${{ secrets.B2_APPLICATION_KEY_ID }}
+          application-key: ${{ secrets.B2_APPLICATION_KEY }}
+          bucket: ${{ secrets.B2_TEST_BUCKET }}
+          source: ${{ env.PREFIX }}

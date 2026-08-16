@@ -1,0 +1,119 @@
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { collectInputSecretsForScrubbing, parseInputs } from '../src/inputs.ts'
+import { captureStdout, resetInputEnv, setInput } from './_helpers.ts'
+
+describe('parseInputs', () => {
+  beforeEach(() => {
+    resetInputEnv()
+    Reflect.deleteProperty(process.env, 'B2_APPLICATION_KEY_ID')
+    Reflect.deleteProperty(process.env, 'B2_APPLICATION_KEY')
+  })
+
+  afterEach(resetInputEnv)
+
+  it('reads credentials from action inputs', () => {
+    setInput('action', 'upload')
+    setInput('application-key-id', 'kid-1')
+    setInput('application-key', 'sek-1')
+    setInput('bucket', 'my-bucket')
+
+    const r = parseInputs()
+    expect(r.applicationKeyId).toBe('kid-1')
+    expect(r.applicationKey).toBe('sek-1')
+    expect(r.bucket).toBe('my-bucket')
+    expect(r.action).toBe('upload')
+  })
+
+  it('falls back to B2_APPLICATION_KEY_ID / B2_APPLICATION_KEY env vars', () => {
+    setInput('action', 'download')
+    setInput('bucket', 'b')
+    process.env.B2_APPLICATION_KEY_ID = 'env-kid'
+    process.env.B2_APPLICATION_KEY = 'env-sek'
+
+    const r = parseInputs()
+    expect(r.applicationKeyId).toBe('env-kid')
+    expect(r.applicationKey).toBe('env-sek')
+  })
+
+  it('dedupes parser-scope secret masks before registering them', async () => {
+    setInput('application-key', 'secret')
+    process.env.B2_APPLICATION_KEY_ID = ' kid '
+    process.env.B2_APPLICATION_KEY = 'secret'
+
+    let secrets: string[] = []
+    const stdout = await captureStdout(() => {
+      secrets = collectInputSecretsForScrubbing()
+    })
+
+    expect(secrets).toEqual([' kid ', 'kid', 'secret'])
+    expect(stdout.match(/::add-mask::/g)).toHaveLength(3)
+  })
+
+  it('rejects an unknown action value', () => {
+    setInput('action', 'whatever')
+    setInput('bucket', 'b')
+    setInput('application-key-id', 'k')
+    setInput('application-key', 's')
+    expect(() => parseInputs()).toThrow(/Invalid 'action' input/)
+  })
+
+  it('throws when credentials are missing entirely', () => {
+    setInput('action', 'upload')
+    setInput('bucket', 'b')
+    expect(() => parseInputs()).toThrow(/Missing credential/)
+  })
+
+  it('parses include/exclude as csv', () => {
+    setInput('action', 'upload')
+    setInput('application-key-id', 'k')
+    setInput('application-key', 's')
+    setInput('bucket', 'b')
+    setInput('include', 'src/**, dist/**')
+    setInput('exclude', '**/*.log')
+
+    const r = parseInputs()
+    expect(r.include).toEqual(['src/**', 'dist/**'])
+    expect(r.exclude).toEqual(['**/*.log'])
+  })
+
+  it('parses booleans and integers', () => {
+    setInput('action', 'upload')
+    setInput('application-key-id', 'k')
+    setInput('application-key', 's')
+    setInput('bucket', 'b')
+    setInput('concurrency', '8')
+    setInput('part-size', '5000000')
+    setInput('resume', 'false')
+    setInput('dry-run', '1')
+
+    const r = parseInputs()
+    expect(r.concurrency).toBe(8)
+    expect(r.partSize).toBe(5_000_000)
+    expect(r.resume).toBe(false)
+    expect(r.dryRun).toBe(true)
+  })
+
+  it('keeps an empty purge source only when whole-bucket purge is confirmed', () => {
+    setInput('action', 'purge')
+    setInput('application-key-id', 'k')
+    setInput('application-key', 's')
+    setInput('bucket', 'b')
+    setInput('source', '')
+
+    const unconfirmed = parseInputs()
+    expect(unconfirmed.source).toBeUndefined()
+    expect(unconfirmed.allowBucketPurge).toBe(false)
+
+    resetInputEnv()
+    setInput('action', 'purge')
+    setInput('application-key-id', 'k')
+    setInput('application-key', 's')
+    setInput('bucket', 'b')
+    setInput('source', '')
+    setInput('allow-bucket-purge', 'true')
+
+    const confirmed = parseInputs()
+    expect(confirmed.source).toBe('')
+    expect(confirmed.allowBucketPurge).toBe(true)
+  })
+})
